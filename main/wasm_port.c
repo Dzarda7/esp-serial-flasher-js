@@ -38,7 +38,7 @@ static void transfer_debug_print(const uint8_t *data, uint16_t size, bool write)
 }
 #endif
 
-// Helper function to format hex output like esptool-js
+// Initialize serial buffer if needed
 EM_JS(void, js_init_serial_buffer, (), {
     if (typeof Module.serialBuffer === 'undefined') {
         Module.serialBuffer = new Uint8Array(0);
@@ -133,47 +133,56 @@ EM_ASYNC_JS(void, js_serial_enter_bootloader, (void), {
             log(message);
         }
         
-        // ESP32 bootloader entry sequence:
-        // 1. Set DTR and RTS low
-        await window.serialPort.port.setSignals({ dataTerminalReady: false, requestToSend: false });
+        // ESP32 bootloader entry sequence (esptool compatible)
+        const resetDelay = 50; // Reset delay in milliseconds
+        
+        // Step 1: DTR=0, RTS=1
+        await window.serialPort.port.setSignals({ dataTerminalReady: false, requestToSend: true });
         await new Promise(resolve => setTimeout(resolve, 100));
         
-        // 2. Set DTR high (RESET=0, EN=0 -> chip in reset)
+        // Step 2: DTR=1, RTS=0
         await window.serialPort.port.setSignals({ dataTerminalReady: true, requestToSend: false });
-        await new Promise(resolve => setTimeout(resolve, 50));
+        await new Promise(resolve => setTimeout(resolve, resetDelay));
         
-        // 3. Set RTS high (RESET=1, EN=1 -> chip boots into bootloader)
-        await window.serialPort.port.setSignals({ dataTerminalReady: false, requestToSend: true });
-        await new Promise(resolve => setTimeout(resolve, 50));
+        // Step 3: DTR=0
+        await window.serialPort.port.setSignals({ dataTerminalReady: false });
         
-        // 4. Release signals
-        await window.serialPort.port.setSignals({ dataTerminalReady: false, requestToSend: false });
-        
+        if (typeof log === 'function') {
+            log('[JS] Bootloader entry sequence completed');
+        }
     } catch (error) {
         console.error('[ERROR] Failed to enter bootloader:', error);
+        if (typeof log === 'function') {
+            log('[ERROR] Failed to enter bootloader: ' + error.message);
+        }
     }
 });
 
 // Reset target by toggling RTS signal
-EM_ASYNC_JS(void, js_serial_reset_target, (void), {
+// RTS=true means EN is LOW (chip resets)
+EM_ASYNC_JS(void, js_serial_reset_target, (uint32_t reset_hold_ms), {
     if (!window.serialPort || !window.serialPort.port) {
         console.error('[ERROR] Serial port not open');
         return;
     }
     
     try {
-        let message = '[JS] Resetting target';
         if (typeof log === 'function') {
-            log(message);
+            log('[PORT] Resetting target');
         }
         
-        // Toggle RTS to reset
-        await window.serialPort.port.setSignals({ requestToSend: true });
-        await new Promise(resolve => setTimeout(resolve, 100));
-        await window.serialPort.port.setSignals({ requestToSend: false });
+        // Assert reset (RTS=true)
+        await window.serialPort.port.setSignals({ dataTerminalReady: true, requestToSend: true });
+        await new Promise(resolve => setTimeout(resolve, reset_hold_ms));
+        
+        // Release reset (RTS=false)
+        await window.serialPort.port.setSignals({ dataTerminalReady: true, requestToSend: false });
         
     } catch (error) {
         console.error('[ERROR] Failed to reset target:', error);
+        if (typeof log === 'function') {
+            log('[ERROR] Failed to reset target: ' + error.message);
+        }
     }
 });
 
@@ -282,8 +291,7 @@ esp_loader_error_t loader_port_read(uint8_t *data, uint16_t size, uint32_t timeo
 
 void loader_port_enter_bootloader(void)
 {
-    // Enter bootloader mode (commented out for now)
-    // js_serial_enter_bootloader();
+    js_serial_enter_bootloader();
 }
 
 void loader_port_delay_ms(uint32_t ms)
@@ -308,7 +316,7 @@ esp_loader_error_t loader_port_change_transmission_rate(uint32_t new_baudrate)
 
 void loader_port_reset_target(void)
 {
-    // js_serial_reset_target();
+    js_serial_reset_target(SERIAL_FLASHER_RESET_HOLD_TIME_MS);
 }
 
 void loader_port_debug_print(const char *str)
