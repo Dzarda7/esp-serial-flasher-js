@@ -6,74 +6,90 @@ function log(msg) {
 }
 
 // Continuous background reader that feeds data into Module.serialBuffer
+// Runs continuously once started until port is closed
 async function startBackgroundSerialReader() {
     if (window.serialPort.backgroundReading) {
-        log('[WARN] Background reader already running');
+        log('[DEBUG] Background reader already running');
         return;
     }
     
     window.serialPort.backgroundReading = true;
     log('[DEBUG] Starting background serial reader');
     
-    try {
-        const reader = window.serialPort.port.readable.getReader();
-        window.serialPort.reader = reader;
-        
-        while (window.serialPort.backgroundReading) {
-            try {
-                const { value, done } = await reader.read();
-                
-                if (done) {
-                    log('[DEBUG] Serial stream ended');
-                    break;
-                }
-                
-                if (value && value.length > 0) {
-                    // Append to Module.serialBuffer
-                    const oldBuffer = window.Module.serialBuffer || new Uint8Array(0);
-                    const newBuffer = new Uint8Array(oldBuffer.length + value.length);
-                    newBuffer.set(oldBuffer);
-                    newBuffer.set(value, oldBuffer.length);
-                    window.Module.serialBuffer = newBuffer;
+    (async () => {
+        try {
+            const reader = window.serialPort.port.readable.getReader();
+            window.serialPort.reader = reader;
+            
+            while (window.serialPort.backgroundReading) {
+                try {
+                    const { value, done } = await reader.read();
                     
-                    // Optional: Log received data (for debugging)
-                    // console.log('[RX Background] ' + value.length + ' bytes, buffer now: ' + newBuffer.length);
-                }
-            } catch (readError) {
-                if (window.serialPort.backgroundReading) {
-                    log('[ERROR] Background read error: ' + readError.message);
-                    break;
+                    if (done) {
+                        log('[DEBUG] Serial stream ended');
+                        break;
+                    }
+                    
+                    if (value && value.length > 0) {
+                        // Append to Module.serialBuffer
+                        const oldBuffer = window.Module.serialBuffer || new Uint8Array(0);
+                        const newBuffer = new Uint8Array(oldBuffer.length + value.length);
+                        newBuffer.set(oldBuffer);
+                        newBuffer.set(value, oldBuffer.length);
+                        window.Module.serialBuffer = newBuffer;
+                        
+                        // Optional: Log received data (for debugging)
+                        // console.log('[RX Background] ' + value.length + ' bytes, buffer now: ' + newBuffer.length);
+                    }
+                } catch (readError) {
+                    if (window.serialPort.backgroundReading) {
+                        log('[ERROR] Background read error: ' + readError.message);
+                        break;
+                    }
                 }
             }
-        }
-    } catch (error) {
-        log('[ERROR] Background reader failed to start: ' + error.message);
-    } finally {
-        window.serialPort.backgroundReading = false;
-        if (window.serialPort.reader) {
-            try {
-                window.serialPort.reader.releaseLock();
-            } catch (e) {
-                // Ignore
+        } catch (error) {
+            log('[ERROR] Background reader failed to start: ' + error.message);
+        } finally {
+            window.serialPort.backgroundReading = false;
+            if (window.serialPort.reader) {
+                try {
+                    window.serialPort.reader.releaseLock();
+                } catch (e) {
+                    // Ignore
+                }
+                window.serialPort.reader = null;
             }
-            window.serialPort.reader = null;
+            log('[DEBUG] Background serial reader stopped');
         }
-        log('[DEBUG] Background serial reader stopped');
-    }
+    })();
 }
 
-// Stop background reader
-function stopBackgroundSerialReader() {
+// Stop background reader (only called when closing port)
+async function stopBackgroundSerialReader() {
     if (window.serialPort.backgroundReading) {
         log('[DEBUG] Stopping background serial reader');
         window.serialPort.backgroundReading = false;
+        
+        // Cancel the reader to unblock it
+        if (window.serialPort.reader) {
+            try {
+                await window.serialPort.reader.cancel();
+            } catch (e) {
+                // Ignore
+            }
+        }
+        
+        // Wait a bit for cleanup
+        await new Promise(resolve => setTimeout(resolve, 100));
     }
 }
 
 // Serial port state management
 window.serialPort = {
     port: null,
-    reader: null
+    reader: null,
+    backgroundReading: false
 };
 
 // Open serial port
@@ -130,7 +146,7 @@ async function openSerialPort() {
             log('[WARN] Could not set control signals: ' + err);
         }
         
-        // Start background reader to continuously fill the buffer
+        // Start background reader - it will run continuously
         startBackgroundSerialReader();
         
         log('[DEBUG] Serial port ready');
@@ -146,7 +162,7 @@ async function openSerialPort() {
 // Close serial port
 async function closeSerialPort() {
     // Stop background reader first
-    stopBackgroundSerialReader();
+    await stopBackgroundSerialReader();
     
     // Wait a bit for background reader to stop
     await new Promise(resolve => setTimeout(resolve, 100));
@@ -231,6 +247,10 @@ document.getElementById('detectFlashBtn').addEventListener('click', async functi
     if (!Module) return;
     
     try {
+        // Clear buffer (reader is already running)
+        log('[DEBUG] Starting communication session (clearing buffer)...');
+        Module.serialBuffer = new Uint8Array(0);
+        
         // First, connect to the ESP32
         log('>>> Calling esp_loader_connect_wrapper()');
         const esp_loader_connect_wrapper = Module.cwrap('esp_loader_connect_wrapper', 'number', [], { async: true });
@@ -267,6 +287,9 @@ document.getElementById('detectFlashBtn').addEventListener('click', async functi
     } catch (error) {
         log('[ERROR] Exception: ' + error);
         console.error('Full error:', error);
+    } finally {
+        // Background reader keeps running
+        log('[DEBUG] Communication session ended');
     }
 });
 
@@ -344,6 +367,10 @@ document.getElementById('flashBtn').addEventListener('click', async function() {
     addressInput.disabled = true;
     
     try {
+        // Clear buffer (reader is already running)
+        log('[DEBUG] Starting communication session (clearing buffer)...');
+        Module.serialBuffer = new Uint8Array(0);
+        
         // First, connect to the ESP32
         log('>>> Calling esp_loader_connect_wrapper()');
         const esp_loader_connect_wrapper = Module.cwrap('esp_loader_connect_wrapper', 'number', [], { async: true });
@@ -419,6 +446,9 @@ document.getElementById('flashBtn').addEventListener('click', async function() {
         console.error('Full error:', error);
         hideProgress();
     } finally {
+        // Background reader keeps running
+        log('[DEBUG] Communication session ended');
+        
         // Re-enable controls
         serialBtn.disabled = false;
         detectFlashBtn.disabled = false;
