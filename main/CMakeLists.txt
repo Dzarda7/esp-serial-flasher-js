@@ -16,7 +16,7 @@ target_link_libraries(mylib PRIVATE flasher)
 
 # Functions you want to call from JS (with leading underscores)
 set(EXPORTED_FUNCTIONS
-    ["_esp_loader_connect_wrapper","_esp_loader_flash_detect_size","_esp_loader_flash_start","_esp_loader_flash_write","_malloc","_free"]
+    ["_flasher_connect","_flasher_change_baudrate","_flasher_flash_detect_size","_flasher_flash_start","_flasher_flash_write","_flasher_flash_finish","_malloc","_free"]
 )
 
 # Runtime methods to export
