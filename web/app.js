@@ -20,26 +20,22 @@ async function startBackgroundSerialReader() {
         try {
             const reader = window.serialPort.port.readable.getReader();
             window.serialPort.reader = reader;
-            
+
             while (window.serialPort.backgroundReading) {
                 try {
                     const { value, done } = await reader.read();
-                    
+
                     if (done) {
                         log('[DEBUG] Serial stream ended');
                         break;
                     }
-                    
+
                     if (value && value.length > 0) {
-                        // Append to Module.serialBuffer
                         const oldBuffer = window.Module.serialBuffer || new Uint8Array(0);
                         const newBuffer = new Uint8Array(oldBuffer.length + value.length);
                         newBuffer.set(oldBuffer);
                         newBuffer.set(value, oldBuffer.length);
                         window.Module.serialBuffer = newBuffer;
-                        
-                        // Optional: Log received data (for debugging)
-                        // console.log('[RX Background] ' + value.length + ' bytes, buffer now: ' + newBuffer.length);
                     }
                 } catch (readError) {
                     if (window.serialPort.backgroundReading) {
@@ -53,11 +49,7 @@ async function startBackgroundSerialReader() {
         } finally {
             window.serialPort.backgroundReading = false;
             if (window.serialPort.reader) {
-                try {
-                    window.serialPort.reader.releaseLock();
-                } catch (e) {
-                    // Ignore
-                }
+                try { window.serialPort.reader.releaseLock(); } catch (e) {}
                 window.serialPort.reader = null;
             }
             log('[DEBUG] Background serial reader stopped');
@@ -100,15 +92,15 @@ async function openSerialPort() {
         
         log('[DEBUG] Port selected, opening...');
         
-        // Open port with appropriate settings for ESP32
-        await window.serialPort.port.open({ 
+        // Always open at 115200 for initial ROM bootloader sync
+        await window.serialPort.port.open({
             baudRate: 115200,
             dataBits: 8,
             stopBits: 1,
             parity: "none",
             flowControl: "none"
         });
-        
+
         log('[OK] Serial port opened at 115200 baud');
         
         // Initialize serial buffer in Module
@@ -226,6 +218,7 @@ document.getElementById('serialBtn').addEventListener('click', async function() 
             document.getElementById('detectFlashBtn').disabled = false;
             document.getElementById('binFile').disabled = false;
             document.getElementById('flashAddress').disabled = false;
+            document.getElementById('baudRate').disabled = true;
             this.textContent = 'Close Serial Port';
             this.style.background = '#dc3545';
         }
@@ -237,6 +230,7 @@ document.getElementById('serialBtn').addEventListener('click', async function() 
         document.getElementById('binFile').disabled = true;
         document.getElementById('flashAddress').disabled = true;
         document.getElementById('flashBtn').disabled = true;
+        document.getElementById('baudRate').disabled = false;
         this.textContent = 'Open Serial Port';
         this.style.background = '#007bff';
     }
@@ -251,24 +245,36 @@ document.getElementById('detectFlashBtn').addEventListener('click', async functi
         log('[DEBUG] Starting communication session (clearing buffer)...');
         Module.serialBuffer = new Uint8Array(0);
         
-        // First, connect to the ESP32
-        log('>>> Calling esp_loader_connect_wrapper()');
-        const esp_loader_connect_wrapper = Module.cwrap('esp_loader_connect_wrapper', 'number', [], { async: true });
-        const connectResult = await esp_loader_connect_wrapper();
-        
+        // Connect and upload stub
+        log('>>> Calling esp_loader_connect()');
+        const esp_loader_connect = Module.cwrap('flasher_connect', 'number', [], { async: true });
+        const connectResult = await esp_loader_connect();
+
         if (connectResult !== 0) {
-            log('[ERROR] esp_loader_connect_wrapper() failed with error code: ' + connectResult);
+            log('[ERROR] esp_loader_connect() failed with error code: ' + connectResult);
             return;
         }
-        log('[OK] esp_loader_connect_wrapper() returned: ' + connectResult);
-        
+        log('[OK] Stub uploaded successfully');
+
+        // Switch to selected baud rate now that stub is running
+        const selectedBaud = parseInt(document.getElementById('baudRate').value, 10);
+        if (selectedBaud !== 115200) {
+            log('>>> Changing baud rate to ' + selectedBaud);
+            const esp_loader_change_baudrate = Module.cwrap('flasher_change_baudrate', 'number', ['number'], { async: true });
+            const baudResult = await esp_loader_change_baudrate(selectedBaud);
+            if (baudResult !== 0) {
+                log('[ERROR] Baud rate change failed with error code: ' + baudResult);
+                return;
+            }
+        }
+
         // Now detect flash size
         log('>>> Calling esp_loader_flash_detect_size()');
-        
+
         // Allocate memory for the uint32_t output parameter
         const flash_size_ptr = Module._malloc(4); // 4 bytes for uint32_t
-        
-        const esp_loader_flash_detect_size = Module.cwrap('esp_loader_flash_detect_size', 'number', ['number'], { async: true });
+
+        const esp_loader_flash_detect_size = Module.cwrap('flasher_flash_detect_size', 'number', ['number'], { async: true });
         const result = await esp_loader_flash_detect_size(flash_size_ptr);
         
         if (result === 0) { // ESP_LOADER_SUCCESS
@@ -371,26 +377,38 @@ document.getElementById('flashBtn').addEventListener('click', async function() {
         log('[DEBUG] Starting communication session (clearing buffer)...');
         Module.serialBuffer = new Uint8Array(0);
         
-        // First, connect to the ESP32
-        log('>>> Calling esp_loader_connect_wrapper()');
-        const esp_loader_connect_wrapper = Module.cwrap('esp_loader_connect_wrapper', 'number', [], { async: true });
-        const connectResult = await esp_loader_connect_wrapper();
-        
+        // Connect and upload stub
+        log('>>> Calling esp_loader_connect()');
+        const esp_loader_connect = Module.cwrap('flasher_connect', 'number', [], { async: true });
+        const connectResult = await esp_loader_connect();
+
         if (connectResult !== 0) {
-            log('[ERROR] esp_loader_connect_wrapper() failed with error code: ' + connectResult);
+            log('[ERROR] esp_loader_connect() failed with error code: ' + connectResult);
             return;
         }
-        log('[OK] Connected to ESP32');
+        log('[OK] Stub uploaded successfully');
+
+        // Switch to selected baud rate now that stub is running
+        const selectedBaud = parseInt(document.getElementById('baudRate').value, 10);
+        if (selectedBaud !== 115200) {
+            log('>>> Changing baud rate to ' + selectedBaud);
+            const esp_loader_change_baudrate = Module.cwrap('flasher_change_baudrate', 'number', ['number'], { async: true });
+            const baudResult = await esp_loader_change_baudrate(selectedBaud);
+            if (baudResult !== 0) {
+                log('[ERROR] Baud rate change failed with error code: ' + baudResult);
+                return;
+            }
+        }
         
         // Read file into ArrayBuffer
         const arrayBuffer = await file.arrayBuffer();
         const fileData = new Uint8Array(arrayBuffer);
         const fileSize = fileData.length;
-        const blockSize = 100; // 100 bytes
+        const blockSize = 0x4000; // 16KB blocks — optimal for stub mode
         
         // Call esp_loader_flash_start
         log('>>> Calling esp_loader_flash_start()');
-        const esp_loader_flash_start = Module.cwrap('esp_loader_flash_start', 'number', ['number', 'number', 'number'], { async: true });
+        const esp_loader_flash_start = Module.cwrap('flasher_flash_start', 'number', ['number', 'number', 'number'], { async: true });
         console.log('>>> Calling esp_loader_flash_start() with address: ' + address + ', fileSize: ' + fileSize + ', blockSize: ' + blockSize);
         const startResult = await esp_loader_flash_start(address, fileSize, blockSize);
         
@@ -401,7 +419,7 @@ document.getElementById('flashBtn').addEventListener('click', async function() {
         log('[OK] Flash operation started');
         
         // Flash data in blocks
-        const esp_loader_flash_write = Module.cwrap('esp_loader_flash_write', 'number', ['number', 'number'], { async: true });
+        const esp_loader_flash_write = Module.cwrap('flasher_flash_write', 'number', ['number', 'number'], { async: true });
         const totalBlocks = Math.ceil(fileSize / blockSize);
         
         log('[INFO] Flashing ' + totalBlocks + ' blocks...');
@@ -438,6 +456,15 @@ document.getElementById('flashBtn').addEventListener('click', async function() {
             }
         }
         
+        // Finish: verify MD5 and send flash-end command
+        log('>>> Calling esp_loader_flash_finish()');
+        const esp_loader_flash_finish = Module.cwrap('flasher_flash_finish', 'number', [], { async: true });
+        const finishResult = await esp_loader_flash_finish();
+        if (finishResult !== 0) {
+            log('[ERROR] esp_loader_flash_finish() failed with error code: ' + finishResult);
+            return;
+        }
+
         log('[OK] ✓ Flash operation completed successfully!');
         updateProgress(100, '100% - Complete!');
         
