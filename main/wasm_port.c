@@ -17,7 +17,9 @@ typedef struct {
 } wasm_port_t;
 
 // Static instances shared across JS wrapper calls (WASM is single-threaded)
-static wasm_port_t           g_port;
+static wasm_port_t           g_port = {
+    ._baud_rate = 115200,
+};
 static esp_loader_t          g_loader;
 static esp_loader_flash_cfg_t g_flash_cfg;
 
@@ -66,9 +68,13 @@ EM_ASYNC_JS(int, js_serial_write, (const uint8_t *data, uint16_t size), {
         for (let i = 0; i < size; i++) {
             dataArray[i] = HEAPU8[data + i];
         }
-        const writer = window.serialPort.port.writable.getWriter();
-        await writer.write(dataArray);
-        writer.releaseLock();
+        if (typeof writeSerialData === 'function') {
+            await writeSerialData(dataArray);
+        } else {
+            const writer = window.serialPort.port.writable.getWriter();
+            await writer.write(dataArray);
+            writer.releaseLock();
+        }
         return 0;
     } catch (error) {
         console.error('[ERROR] Serial write failed:', error);
@@ -183,41 +189,10 @@ EM_ASYNC_JS(void, js_debug_print, (const char *str), {
 
 EM_ASYNC_JS(int, js_change_baud_rate, (uint32_t new_baud), {
     try {
-        if (typeof log === 'function') {
-            log('[PORT] Changing baud rate to ' + new_baud);
+        if (typeof reconfigureSerialPort !== 'function') {
+            throw new Error('Serial reconfigure helper is not available');
         }
-
-        // Stop background reader
-        window.serialPort.backgroundReading = false;
-        if (window.serialPort.reader) {
-            try { await window.serialPort.reader.cancel(); } catch (e) {}
-            window.serialPort.reader = null;
-        }
-
-        // Wait for streams to unlock
-        let attempts = 0;
-        while ((window.serialPort.port.readable?.locked || window.serialPort.port.writable?.locked) && attempts < 20) {
-            await new Promise(resolve => setTimeout(resolve, 50));
-            attempts++;
-        }
-
-        await window.serialPort.port.close();
-
-        await window.serialPort.port.open({
-            baudRate: new_baud,
-            dataBits: 8,
-            stopBits: 1,
-            parity: "none",
-            flowControl: "none"
-        });
-
-        // Clear buffer and restart background reader
-        Module.serialBuffer = new Uint8Array(0);
-        startBackgroundSerialReader();
-
-        if (typeof log === 'function') {
-            log('[PORT] Baud rate changed to ' + new_baud);
-        }
+        await reconfigureSerialPort(new_baud);
         return 0;
     } catch (error) {
         console.error('[ERROR] Baud rate change failed:', error);

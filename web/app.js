@@ -5,18 +5,86 @@ function log(msg) {
     console.log(msg);
 }
 
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function clearSerialBuffer() {
+    if (window.Module) {
+        window.Module.serialBuffer = new Uint8Array(0);
+    }
+}
+
+async function releaseSerialWriter(closeWriter) {
+    if (!window.serialPort.writer) {
+        return;
+    }
+
+    try {
+        if (closeWriter) {
+            await window.serialPort.writer.close();
+        }
+    } catch (err) {
+        console.log('Writer close error:', err);
+    }
+
+    try {
+        window.serialPort.writer.releaseLock();
+    } catch (err) {
+        console.log('Writer release error:', err);
+    }
+
+    window.serialPort.writer = null;
+}
+
+async function writeSerialData(dataArray) {
+    if (!window.serialPort || !window.serialPort.port || !window.serialPort.port.writable) {
+        throw new Error('Serial port not open or not writable');
+    }
+
+    if (window.serialPort.reconfiguring) {
+        throw new Error('Cannot write while serial port is reconfiguring');
+    }
+
+    window.serialPort.writeChain = window.serialPort.writeChain.then(async () => {
+        if (!window.serialPort.port || !window.serialPort.port.writable) {
+            throw new Error('Serial port became unavailable during write');
+        }
+
+        if (!window.serialPort.writer) {
+            window.serialPort.writer = window.serialPort.port.writable.getWriter();
+        }
+
+        await window.serialPort.writer.write(dataArray);
+    });
+
+    try {
+        await window.serialPort.writeChain;
+    } catch (err) {
+        await releaseSerialWriter(false);
+        window.serialPort.writeChain = Promise.resolve();
+        throw err;
+    }
+}
+
+async function flushSerialBuffers(settleMs = 100) {
+    clearSerialBuffer();
+    await sleep(settleMs);
+    clearSerialBuffer();
+}
+
 // Continuous background reader that feeds data into Module.serialBuffer
 // Runs continuously once started until port is closed
 async function startBackgroundSerialReader() {
     if (window.serialPort.backgroundReading) {
         log('[DEBUG] Background reader already running');
-        return;
+        return window.serialPort.readLoopPromise;
     }
     
     window.serialPort.backgroundReading = true;
     log('[DEBUG] Starting background serial reader');
     
-    (async () => {
+    window.serialPort.readLoopPromise = (async () => {
         try {
             const reader = window.serialPort.port.readable.getReader();
             window.serialPort.reader = reader;
@@ -52,28 +120,87 @@ async function startBackgroundSerialReader() {
                 try { window.serialPort.reader.releaseLock(); } catch (e) {}
                 window.serialPort.reader = null;
             }
+            window.serialPort.readLoopPromise = null;
             log('[DEBUG] Background serial reader stopped');
         }
     })();
+
+    return window.serialPort.readLoopPromise;
 }
 
 // Stop background reader (only called when closing port)
 async function stopBackgroundSerialReader() {
-    if (window.serialPort.backgroundReading) {
-        log('[DEBUG] Stopping background serial reader');
-        window.serialPort.backgroundReading = false;
-        
-        // Cancel the reader to unblock it
-        if (window.serialPort.reader) {
-            try {
-                await window.serialPort.reader.cancel();
-            } catch (e) {
-                // Ignore
-            }
+    if (!window.serialPort.backgroundReading && !window.serialPort.readLoopPromise) {
+        return;
+    }
+
+    log('[DEBUG] Stopping background serial reader');
+    window.serialPort.backgroundReading = false;
+
+    // Cancel the reader to unblock it and wait until the lock is released.
+    if (window.serialPort.reader) {
+        try {
+            await window.serialPort.reader.cancel();
+        } catch (e) {
+            // Ignore
         }
-        
-        // Wait a bit for cleanup
-        await new Promise(resolve => setTimeout(resolve, 100));
+    }
+
+    if (window.serialPort.readLoopPromise) {
+        try {
+            await window.serialPort.readLoopPromise;
+        } catch (e) {
+            // Ignore
+        }
+    }
+}
+
+async function reconfigureSerialPort(newBaud) {
+    if (!window.serialPort || !window.serialPort.port) {
+        throw new Error('Serial port not open');
+    }
+
+    if (window.serialPort.currentBaudRate === newBaud) {
+        log('[PORT] Baud rate already ' + newBaud);
+        return;
+    }
+
+    log('[PORT] Changing baud rate to ' + newBaud);
+
+    try {
+        await window.serialPort.writeChain;
+    } catch (err) {
+        console.log('Pending write error before reconfigure:', err);
+    }
+
+    window.serialPort.reconfiguring = true;
+
+    try {
+        await releaseSerialWriter(false);
+        await stopBackgroundSerialReader();
+        await flushSerialBuffers(25);
+
+        await window.serialPort.port.close();
+
+        await window.serialPort.port.open({
+            baudRate: newBaud,
+            dataBits: 8,
+            stopBits: 1,
+            parity: "none",
+            flowControl: "none"
+        });
+
+        // Do not touch DTR/RTS here. Some USB-serial drivers apply signal changes
+        // during open, and another explicit change can reset the chip after the
+        // stub has already switched to the new baud rate.
+        clearSerialBuffer();
+        startBackgroundSerialReader();
+        await flushSerialBuffers(100);
+
+        window.serialPort.currentBaudRate = newBaud;
+        log('[PORT] Baud rate changed to ' + newBaud);
+    } finally {
+        window.serialPort.reconfiguring = false;
     }
 }
 
@@ -81,7 +208,12 @@ async function stopBackgroundSerialReader() {
 window.serialPort = {
     port: null,
     reader: null,
-    backgroundReading: false
+    writer: null,
+    backgroundReading: false,
+    readLoopPromise: null,
+    writeChain: Promise.resolve(),
+    reconfiguring: false,
+    currentBaudRate: 115200
 };
 
 // Open serial port
@@ -108,6 +240,8 @@ async function openSerialPort() {
             window.Module.serialBuffer = new Uint8Array(0);
             log('[DEBUG] Serial buffer initialized');
         }
+        window.serialPort.currentBaudRate = 115200;
+        window.serialPort.writeChain = Promise.resolve();
         
         // Monitor for port disconnect
         const disconnectHandler = async (event) => {
@@ -157,7 +291,7 @@ async function closeSerialPort() {
     await stopBackgroundSerialReader();
     
     // Wait a bit for background reader to stop
-    await new Promise(resolve => setTimeout(resolve, 100));
+    await sleep(100);
     
     // Release reader if it exists
     if (window.serialPort.reader) {
@@ -171,9 +305,8 @@ async function closeSerialPort() {
     }
     
     // Clear serial buffer
-    if (window.Module && window.Module.serialBuffer) {
-        window.Module.serialBuffer = new Uint8Array(0);
-    }
+    clearSerialBuffer();
+    await releaseSerialWriter(true);
     
     // Close port
     if (window.serialPort.port) {
@@ -190,6 +323,8 @@ async function closeSerialPort() {
         }
         window.serialPort.port = null;
     }
+    window.serialPort.writeChain = Promise.resolve();
+    window.serialPort.currentBaudRate = 115200;
     
     log('[OK] Serial port closed');
 }
