@@ -118,15 +118,16 @@
             <select id="baudRate" style="padding:8px;border:1px solid #ccc;border-radius:4px;font-size:15px;">
                 <option value="115200">115200</option>
                 <option value="230400">230400</option>
-                <option value="460800">460800</option>
-                <option value="921600" selected>921600</option>
+                <option value="460800" selected>460800</option>
+                <option value="921600">921600</option>
                 <option value="1500000">1500000</option>
                 <option value="2000000">2000000</option>
             </select>
         </div>
         <button id="serialBtn" disabled>Open Serial Port</button>
         <button id="detectFlashBtn" disabled>Detect Flash Size</button>
-        
+        <button id="resetBtn" disabled>Reset Target</button>
+
         <div class="flash-section">
             <h3>Flash Binary</h3>
             <div class="flash-row">
@@ -145,11 +146,41 @@
                 </div>
             </div>
         </div>
-        
+
+        <div class="flash-section">
+            <h3>Read Flash</h3>
+            <div class="flash-row">
+                <label for="readAddress">Address:</label>
+                <input type="text" id="readAddress" value="0x0" placeholder="0x0" disabled>
+                <label for="readLength">Length:</label>
+                <input type="text" id="readLength" value="0x1000" placeholder="0x1000" disabled>
+                <button id="readFlashBtn" disabled>Read &amp; Download</button>
+            </div>
+            <div id="readProgressContainer" style="display:none;">
+                <div id="readProgressBar" style="width:100%;height:30px;background:#e0e0e0;border-radius:4px;overflow:hidden;position:relative;">
+                    <div id="readProgressFill" style="height:100%;background:linear-gradient(90deg, #4CAF50, #45a049);width:0%;transition:width 0.3s ease;"></div>
+                    <div id="readProgressText" style="position:absolute;width:100%;text-align:center;line-height:30px;font-weight:bold;color:#333;">0%</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="flash-section">
+            <h3>Erase Flash</h3>
+            <div class="flash-row">
+                <button id="eraseAllBtn" disabled>Erase Entire Flash</button>
+            </div>
+            <div class="flash-row">
+                <label for="eraseAddress">Address:</label>
+                <input type="text" id="eraseAddress" value="0x10000" placeholder="0x10000" disabled>
+                <label for="eraseSize">Size:</label>
+                <input type="text" id="eraseSize" value="0x1000" placeholder="0x1000" disabled>
+                <button id="eraseRegionBtn" disabled>Erase Region</button>
+            </div>
+        </div>
+
         <div id="output">Loading module...</div>
     </div>
 
-    <script src="mylib.js"></script>
-    <script src="app.js"></script>
+    <script type="module" src="app.js"></script>
 </body>
 </html>

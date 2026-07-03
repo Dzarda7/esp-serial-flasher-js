@@ -1,160 +1,230 @@
 # ESP Serial Flasher JS
 
-A WebAssembly port of the [ESP Serial Flasher](https://github.com/espressif/esp-serial-flasher) library that enables flashing Espressif SoCs directly from a web browser using the Web Serial API.
+A WebAssembly port of [ESP Serial Flasher](https://github.com/espressif/esp-serial-flasher) with a reusable JavaScript API for browser, WebUSB-style, Electron, or custom serial transports.
 
-This project compiles the ESP Serial Flasher C library to WebAssembly using Emscripten, providing a JavaScript interface that allows web applications to communicate with Espressif SoCs over serial ports for firmware flashing, chip detection, and other operations.
+The package compiles the native C flasher with Emscripten and hides the generated module behind a small async API suitable for npm distribution.
 
 ## Features
 
-- 🌐 **Browser-based flashing** - No installation required, flash Espressif SoCs directly from your browser
-- 🔌 **Web Serial API** - Uses modern browser capabilities to communicate with serial devices
-- ⚡ **Full flasher capabilities** - Supports chip detection, firmware flashing, flash size detection, and more
-- 🎯 **Multiple chip support** - Compatible with various ESP32 and ESP8266 variants
-- 🔧 **WebAssembly powered** - Leverages the native ESP Serial Flasher library for reliable flashing
+- Browser-based ESP flashing through Web Serial
+- Pluggable serial transport interface for downstream projects
+- WebAssembly-backed connect, target detection, MAC read, flash-size detection, read, write, erase, reset, and baud-rate changes
+- Typed errors (`EspSerialFlasherError`) with a documented `EspLoaderErrorCode` enum for branching on failure type
+- TypeScript declarations for package consumers
 
-## Quick Start (Testing)
+## JavaScript API
 
-For a quick test without building, you can use Python's built-in web server:
+Build the package artifacts:
 
 ```bash
-cd web
-python3 -m http.server 8000
+npm run build
 ```
 
-Then open your browser and navigate to `http://localhost:8000`. The web application should load with pre-built WASM files.
+Use the package from a browser app:
 
-> **Note:** The Web Serial API requires HTTPS or localhost. Modern browsers (Chrome, Edge, Opera) support this API.
+```js
+import { createEspSerialFlasher } from "esp-serial-flasher-wasm";
+import { WebSerialTransport } from "esp-serial-flasher-wasm/web-serial";
+
+const transport = await WebSerialTransport.requestPort();
+await transport.open({ baudRate: 115200 });
+
+const flasher = await createEspSerialFlasher({ transport });
+
+// connect() must be called before any other method (except disconnect()
+// and resetTarget(), which work standalone) — everything else throws
+// EspSerialFlasherError if the flasher isn't connected yet.
+await flasher.connect();
+await flasher.changeBaudRate(921600);
+
+const { bytesWritten, durationMs } = await flasher.flash({
+  address: 0x10000,
+  data: firmwareBytes,
+  onProgress(bytesWritten, totalBytes) {
+    console.log(bytesWritten, totalBytes);
+  },
+});
+// durationMs times only the write loop, matching how esptool reports
+// speed — it excludes flash_finish()'s device-side MD5 verification.
+```
+
+Branch on error type using `EspLoaderErrorCode` instead of hardcoding numbers:
+
+```js
+import { EspLoaderErrorCode } from "esp-serial-flasher-wasm";
+
+try {
+  await flasher.flash({ address: 0x10000, data: firmwareBytes });
+} catch (error) {
+  if (error.code === EspLoaderErrorCode.TIMEOUT) {
+    // offer a retry
+  } else if (error.code === EspLoaderErrorCode.INVALID_MD5) {
+    // don't retry automatically — the data that arrived doesn't match
+  }
+}
+```
+
+`createEspSerialFlasher()` only needs `transport` (and optionally `logger`) for
+normal use. Low-level Emscripten-module plumbing — only needed for custom
+bundler setups — lives under a separate `advanced` key so it doesn't clutter
+the common case:
+
+```js
+const flasher = await createEspSerialFlasher({
+  transport,
+  advanced: {
+    locateFile: (path) => new URL(`./dist/${path}`, import.meta.url).href,
+  },
+});
+```
+
+Custom transports implement this interface:
+
+```ts
+interface SerialTransport {
+  write(data: Uint8Array): Promise<void>;
+  read(size: number, timeoutMs: number): Promise<Uint8Array | null>;
+  setBaudRate?(baudRate: number): Promise<void>;
+  setSignals?(signals: { dataTerminalReady?: boolean; requestToSend?: boolean }): Promise<void>;
+  enterBootloader?(): Promise<void>;
+  resetTarget?(resetHoldMs?: number): Promise<void>;
+  flush?(): Promise<void>;
+}
+```
 
 ## Development Setup
 
-To make changes and rebuild the project, follow these steps:
-
 ### Prerequisites
 
-- **CMake** (version 3.16 or later)
-- **Emscripten SDK** (for compiling to WebAssembly)
-- **Git** (for cloning submodules)
-- **Python 3** (for local testing)
+- CMake 3.22 or newer
+- Emscripten SDK
+- Git
+- Node.js/npm
+- Python 3 for local testing
 
-### 1. Initialize the Submodule
-
-The ESP Serial Flasher library is included as a git submodule. Initialize it first:
+### Initialize Submodules
 
 ```bash
 git submodule update --init --recursive
 ```
 
-### 2. Install and Setup Emscripten
-
-Download and install the Emscripten SDK:
+### Setup Emscripten
 
 ```bash
-# Clone the Emscripten SDK
 git clone https://github.com/emscripten-core/emsdk.git
 cd emsdk
-
-# Download and install the latest SDK tools
 ./emsdk install latest
-
-# Activate the SDK in your environment
 ./emsdk activate latest
-
-# Source the environment variables (do this in every new terminal session)
 source ./emsdk_env.sh
 ```
 
-> **Important:** You need to run `source ./emsdk_env.sh` in every new terminal session where you want to build the project.
+Run `source ./emsdk_env.sh` in each terminal session before building.
 
-### 3. Build the Project
+### Build
 
 ```bash
-# Create a build directory
-mkdir -p build
-cd build
-
-# Configure with CMake using Emscripten
-emcmake cmake ..
-
-# Build
-emmake make
+npm run build
 ```
 
-This will generate:
-- `build/main/mylib.js` - JavaScript glue code
-- `build/main/mylib.wasm` - WebAssembly binary
+This generates:
 
-### 4. Copy Build Artifacts to Web Directory
+- `build/main/esp-serial-flasher.js`
+- `build/main/esp-serial-flasher.wasm`
+- `dist/esp-serial-flasher.js`
+- `dist/esp-serial-flasher.wasm`
 
-After building, copy the generated files to the web directory:
+The flasher library has its own levelled logging (`ESP_LOADER_LOG_ERROR` /
+`WARN` / `INFO` / `DEBUG`), routed through the `log`/`log_hex` port callbacks
+in `main/wasm_port.c` to `Module.logger` — the same logger you already pass
+to `createEspSerialFlasher()`. The verbosity is a compile-time gate
+(`SERIAL_FLASHER_LOG_LEVEL` in the root `CMakeLists.txt`, currently `INFO`),
+so use the library's own logging instead of adding ad-hoc `console.log`s
+when debugging. To get full byte-level TX/RX hex dumps for protocol-level
+issues (framing, unexpected disconnects, timeouts), rebuild at `DEBUG`:
 
 ```bash
-# From the build directory
-cp main/mylib.js ../web/
-cp main/mylib.wasm ../web/
+emcmake cmake -S . -B build -DSERIAL_FLASHER_LOG_LEVEL=DEBUG && emmake cmake --build build
+npm run copy:wasm
 ```
 
-Or from the project root:
+`DEBUG` is very verbose (every byte of every transfer); reconfigure with
+`-DSERIAL_FLASHER_LOG_LEVEL=INFO` (or omit the flag) to go back to normal.
+
+### Test The Demo
+
+Serve the project root so the demo can import `src/` and `dist/`:
 
 ```bash
-cp build/main/mylib.js web/
-cp build/main/mylib.wasm web/
-```
-
-### 5. Test Your Changes
-
-Start a local web server:
-
-```bash
-cd web
 python3 -m http.server 8000
 ```
 
-Open `http://localhost:8000` in your browser and test the functionality.
+Open `http://localhost:8000/web/`.
+
+The Web Serial API requires HTTPS or localhost. Chrome, Chromium, Edge, and Opera support it.
+
+The demo page exposes: opening/closing the serial port, resetting the target,
+detecting flash size, flashing a `.bin` file to an address, reading back a
+flash region (downloaded as a `.bin`), and erasing either the whole flash or
+a specific region.
 
 ## Project Structure
 
-```
+```text
 esp-serial-flasher-js/
-├── CMakeLists.txt              # Root CMake configuration
-├── main/
-│   ├── CMakeLists.txt          # WASM target configuration
-│   └── wasm_port.c             # WebAssembly port implementation
-├── web/
-│   ├── index.html              # Web interface
-│   ├── app.js                  # JavaScript application logic
-│   ├── mylib.js                # Generated WASM glue code
-│   └── mylib.wasm              # Generated WebAssembly binary
-├── esp-serial-flasher/         # ESP Serial Flasher library (submodule)
-└── build/                      # Build artifacts (generated)
+├── src/                          # THE NPM PACKAGE — what consumers import
+│   ├── index.js / index.d.ts               # public API (createEspSerialFlasher, EspSerialFlasher)
+│   └── web-serial-transport.js / .d.ts     # the bundled Web Serial transport
+├── dist/                         # compiled WASM the package loads (generated, committed)
+│   ├── esp-serial-flasher.js
+│   └── esp-serial-flasher.wasm
+├── web/                          # DEMO app — one example consumer, not shipped
+│   ├── index.html
+│   └── app.js
+├── index.html                    # root redirect to web/ (for GitHub Pages)
+├── main/                         # NATIVE GLUE — C↔JS bridge, compiled to dist/
+│   ├── CMakeLists.txt
+│   └── wasm_port.c
+├── esp-serial-flasher/           # the Espressif C library (git submodule)
+├── scripts/                      # build helper (copies build output into dist/)
+│   └── copy-wasm-artifacts.mjs
+├── CMakeLists.txt                # top-level native build config
+└── build/                        # native build output (generated, gitignored)
 ```
+
+In short: **`src/` + `dist/` are the library**, `web/` is just an example that
+uses it, and `main/` + `esp-serial-flasher/` + `scripts/` + the CMake files are
+the toolchain that produces `dist/`.
 
 ## How It Works
 
-1. **WASM Port (`main/wasm_port.c`)** - Implements the platform-specific functions required by the ESP Serial Flasher library, bridging C calls to JavaScript Web Serial API calls using Emscripten's `EM_JS` and `EM_ASYNC_JS` macros.
+1. `main/wasm_port.c` implements the `esp_loader_port_ops_t` callbacks and forwards serial reads, writes, reset, and baud-rate changes to `Module.serialTransport`.
+2. `src/index.js` wraps the generated Emscripten module and exposes a stable async API.
+3. `src/web-serial-transport.js` is a browser Web Serial transport implementation.
+4. `web/app.js` is a small consumer of the package API.
 
-2. **Web Interface (`web/app.js`)** - Provides the user interface for selecting serial ports, loading firmware files, and triggering flash operations. Communicates with the WASM module through exported functions.
+## Known Quirks
 
-3. **Build System** - Uses CMake with Emscripten to compile the C code to WebAssembly, handling all necessary flags and linking.
-
-## Browser Compatibility
-
-The Web Serial API is required for this application to work. Currently supported browsers:
-
-- ✅ Chrome/Chromium (version 89+)
-- ✅ Edge (version 89+)
-- ✅ Opera (version 75+)
-- ❌ Firefox (not yet supported)
-- ❌ Safari (not yet supported)
-
-## Configuration
-
-You can adjust the build configuration in `CMakeLists.txt`:
-
-- **Exported functions**: Modify the `EXPORTED_FUNCTIONS` list in `main/CMakeLists.txt` to expose additional functions to JavaScript
+- **On Linux, ModemManager can wedge the port after close+reopen.** If
+  connecting works the first time but every subsequent close-then-reopen of
+  the same port times out with zero bytes ever received (until you
+  physically unplug and replug the adapter), this is not a bug in this
+  project — ModemManager auto-probes serial devices and can grab/reset the
+  port's state at the driver level, invisibly to the browser's Web Serial
+  API. No amount of JS-side delay or signal sequencing works around it,
+  since it happens below the browser entirely. This is not specific to this
+  project either — esptool-js hits the exact same issue on the same
+  affected machines, confirming it's an environment/driver problem, not
+  something either implementation can fix from JS. Fix it with a udev rule
+  so ModemManager ignores the device's vendor/product ID:
+  ```
+  SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", ENV{ID_MM_DEVICE_IGNORE}="1"
+  ```
+  (adjust the IDs to match `lsusb`'s output for your adapter), then
+  `sudo udevadm control --reload-rules && sudo udevadm trigger` and replug
+  the device once.
 
 ## Related Projects
 
-- [ESP Serial Flasher](https://github.com/espressif/esp-serial-flasher) - The core library this project is based on
-- [Emscripten](https://emscripten.org/) - The toolchain used to compile C to WebAssembly
-- [Web Serial API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Serial_API) - Browser API for serial communication
-
+- [ESP Serial Flasher](https://github.com/espressif/esp-serial-flasher)
+- [Emscripten](https://emscripten.org/)
+- [Web Serial API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Serial_API)

@@ -1,0 +1,40 @@
+{
+  "name": "esp-serial-flasher-wasm",
+  "version": "0.1.0",
+  "description": "WebAssembly wrapper for Espressif esp-serial-flasher with a JavaScript transport API.",
+  "type": "module",
+  "main": "./src/index.js",
+  "types": "./src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "import": "./src/index.js"
+    },
+    "./web-serial": {
+      "types": "./src/web-serial-transport.d.ts",
+      "import": "./src/web-serial-transport.js"
+    }
+  },
+  "files": [
+    "dist/esp-serial-flasher.js",
+    "dist/esp-serial-flasher.wasm",
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "build:wasm": "emcmake cmake -S . -B build && emmake cmake --build build",
+    "copy:wasm": "node scripts/copy-wasm-artifacts.mjs",
+    "build": "npm run build:wasm && npm run copy:wasm",
+    "prepack": "npm run build"
+  },
+  "keywords": [
+    "esp",
+    "esp32",
+    "esp8266",
+    "flasher",
+    "webserial",
+    "wasm",
+    "webassembly"
+  ],
+  "license": "Apache-2.0"
+}
